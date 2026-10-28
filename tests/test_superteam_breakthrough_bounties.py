@@ -35,6 +35,13 @@ from scripts.pilots.pilot_flp_40789694_customer_complaints_nlp import (
 from scripts.pilots.pilot_flp_40789906_lightburn_svg_layers import (
     split_svg_for_lightburn,
 )
+from scripts.pilots.pilot_03_huntr_blind_trust_arsenal import (
+    generate_huntr_blind_trust_arsenal,
+)
+from scripts.pilots.pilot_06_laborx_bot_demos import (
+    audit_site_for_baiduspider_indexing,
+    build_uncle_bandit_safe_bloxroute_bundle,
+)
 
 
 def test_agave_priority_cu_overestimation_dilution_and_jito_exclusion() -> None:
@@ -219,3 +226,75 @@ def test_breakthrough_upgrades_flp_40789694_and_flp_40789906(tmp_path: Path) -> 
     assert res_svg["auto_closed_engrave_contours"] == 1
     assert res_svg["cut_paths_count"] == 1
     assert res_svg["engrave_paths_count"] == 1
+
+
+def test_huntr_blind_trust_offline_arsenal_and_4kb_guard(tmp_path: Path) -> None:
+    """
+    Verify offline payload generation for Huntr's $15,000 'Blind Trust' challenge:
+    - Enforces <= 4 KB (4096 bytes) on Objective 2's .txt attachment
+    - Enforces ultra-low-token count (<= 12 tokens) for Fewest Tokens leaderboard
+    """
+    res = generate_huntr_blind_trust_arsenal(tmp_path)
+    assert res["anti_bot_manual_submission_only"] is True
+    assert res["objective_2_within_4kb_limit"] is True
+    assert res["objective_2_file_size_bytes"] <= 4096
+    assert res["objective_2_target_email"] == "challenge@attacker.com"
+    assert res["fewest_tokens_metrics"]["obj1_min_tokens"] <= 12
+    assert res["fewest_tokens_metrics"]["obj3_min_tokens"] <= 12
+
+
+def test_laborx_98738_uncle_bandit_guard_and_bloxroute_bundle() -> None:
+    """
+    Verify Uncle Bandit re-org protection and bloXroute `blxr_submit_bundle` formatting
+    for LaborX Job #98738.
+    """
+    parent_hash = "0x" + "ab" * 32
+    reorg_hash = "0x" + "cd" * 32
+
+    # 1. Re-org / Uncle detected -> must abort before sending frontrun
+    aborted = build_uncle_bandit_safe_bloxroute_bundle(
+        target_block_number=21_000_500,
+        expected_parent_block_hash=parent_hash,
+        observed_chain_head_hash=reorg_hash,
+        frontrun_signed_tx_hex="0x1111",
+        victim_raw_tx_hex="0x2222",
+        backrun_signed_tx_hex="0x3333",
+        min_net_profit_wei=10**16,
+        simulated_gross_profit_wei=5 * 10**16,
+        bribe_gas_cost_wei=2 * 10**16,
+    )
+    assert aborted["status"] == "ABORTED_UNCLE_REORG_DETECTED"
+    assert aborted["bloxroute_rpc_payload"] is None
+
+    # 2. Valid parent hash + positive net profit -> builds atomic bloXroute bundle
+    valid = build_uncle_bandit_safe_bloxroute_bundle(
+        target_block_number=21_000_500,
+        expected_parent_block_hash=parent_hash,
+        observed_chain_head_hash=parent_hash,
+        frontrun_signed_tx_hex="0x1111",
+        victim_raw_tx_hex="0x2222",
+        backrun_signed_tx_hex="0x3333",
+        min_net_profit_wei=10**16,
+        simulated_gross_profit_wei=5 * 10**16,
+        bribe_gas_cost_wei=2 * 10**16,
+    )
+    assert valid["status"] == "READY_FOR_BLOXROUTE_GATEWAY"
+    assert valid["bloxroute_rpc_payload"]["method"] == "blxr_submit_bundle"
+    assert valid["bloxroute_rpc_payload"]["params"]["reverting_hashes"] == []
+
+
+def test_laborx_105189_baiduspider_seo_diagnostic_bot() -> None:
+    """
+    Verify Baidu Spider indexing audit (`robots.txt`, GFW-blocked assets, Sitemap XML)
+    for LaborX Job #105189.
+    """
+    robots = "User-agent: Baiduspider\nDisallow: /\n"
+    sitemap = '<?xml version="1.0"?><urlset><url><loc>https://vpn-example.com/zh</loc></url></urlset>'
+    html_head = '<link href="https://fonts.googleapis.com/css?family=Roboto" rel="stylesheet">'
+
+    audit = audit_site_for_baiduspider_indexing(robots, sitemap, html_head)
+    assert audit["baiduspider_allowed_by_robots"] is False
+    assert "fonts.googleapis.com" in audit["gfw_blocking_assets_detected"]
+    assert audit["valid_sitemap_urls_count"] == 1
+    assert audit["baidu_ziyuan_push_body"] == "https://vpn-example.com/zh"
+
