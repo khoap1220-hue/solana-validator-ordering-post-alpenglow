@@ -1,13 +1,12 @@
 version: "3.9"
 services:
-  solana-validator-ordering-analyzer:
+  solana-ordering-verifier:
     build:
-      context: ../../..
-      dockerfile: data/deliverables/superteam_01_inside_the_block/Dockerfile
+      context: .
+      dockerfile: Dockerfile
     environment:
       - SOLANA_RPC_URL=${SOLANA_RPC_URL:-https://api.mainnet-beta.solana.com}
-      - DRY_RUN_MODE=${DRY_RUN_MODE:-true}
-      - MAX_SPEND_LAMPORTS=50000000
-      - SOLANA_SIGNER_KEYPAIR_PATH=/run/secrets/solana_keypair.json
+      - SOLANA_WS_URL=${SOLANA_WS_URL:-wss://api.mainnet-beta.solana.com}
+      - JITO_BLOCK_ENGINE_URL=${JITO_BLOCK_ENGINE_URL:-https://mainnet.block-engine.jito.wtf}
     volumes:
-      - ./raw_mainnet_validator_measurements.jsonl:/workspace/data/deliverables/superteam_01_inside_the_block/raw_mainnet_validator_measurements.jsonl:ro
+      - ./data/deliverables/superteam_01_inside_the_block:/workspace/output
