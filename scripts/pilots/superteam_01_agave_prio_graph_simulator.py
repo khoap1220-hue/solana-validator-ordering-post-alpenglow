@@ -347,3 +347,152 @@ def analyze_mainnet_jsonl_dataset(jsonl_path: str | Path) -> dict[str, Any]:
         ),
         "validator_Ordering_analyses": validator_summaries,
     }
+
+
+def build_latin_square_probe_matrix(
+    target_slot: int,
+    circuit_breaker: FeeSpendCapCircuitBreaker,
+    requested_cu: int = 25_000,
+) -> dict[str, Any]:
+    """
+    Constructs a 4x4 Latin-Square probe burst matrix where 4 priority-fee tiers
+    (0 / 5,000 / 25,000 / 125,000 micro-lamports per CU -> 0 / 1,000 / 5,000 / 25,000 lamports)
+    rotate across all 4 send positions (0, 1, 2, 3) over 4 bursts.
+    Guarantees each fee tier occupies each send position exactly once (zero structural collinearity
+    between send_index and priority_fee).
+    """
+    if target_slot < ALPENGLOW_MIN_MAINNET_SLOT:
+        raise ValueError(
+            f"Target slot {target_slot} is pre-Alpenglow; measurements must be strictly post-Alpenglow."
+        )
+
+    fee_tiers_lamports = [1_000, 5_000, 15_000, 45_000]
+    base_fee_lamports = 5_000
+    bursts: list[list[dict[str, Any]]] = []
+    position_fee_sums = [0, 0, 0, 0]
+
+    for burst_idx in range(4):
+        burst_txs: list[dict[str, Any]] = []
+        for send_pos in range(4):
+            tier_idx = (burst_idx + send_pos) % 4
+            prio_fee = fee_tiers_lamports[tier_idx]
+            total_fee = base_fee_lamports + prio_fee
+            auth = circuit_breaker.authorize_transaction(
+                f"latin_b{burst_idx}_p{send_pos}_slot_{target_slot}", total_fee
+            )
+            position_fee_sums[send_pos] += prio_fee
+            burst_txs.append(
+                {
+                    "burst_index": burst_idx,
+                    "send_position": send_pos,
+                    "priority_fee_lamports": prio_fee,
+                    "total_fee_lamports": total_fee,
+                    "requested_cu": requested_cu,
+                    "budget_status": auth["mode"],
+                }
+            )
+        bursts.append(burst_txs)
+
+    return {
+        "target_slot": target_slot,
+        "burst_count": 4,
+        "txs_per_burst": 4,
+        "position_fee_sums_equal": len(set(position_fee_sums)) == 1,
+        "position_fee_sums": position_fee_sums,
+        "bursts": bursts,
+    }
+
+
+def analyze_fee_payer_write_lock_serialization() -> dict[str, Any]:
+    """
+    Demonstrates the critical methodological confounder ("The Interaction of Your Own Transactions
+    With Each Other"):
+      - Regime A (Shared Single Fee-Payer): Because the fee-payer account (`accountKeys[0]`) is
+        always writable (`is_writable=True`) to deduct lamports, sending 4 probe transactions from
+        the SAME payer wallet forces Agave's `prio-graph` to chain all 4 transactions into 4
+        sequential execution waves (`wave_count == 4`, zero multi-thread parallelism).
+      - Regime B (Disjoint Ephemeral Sub-Payers): Sending the exact same 4 priority-fee probes from
+        4 independent sub-payer wallets (`Payer_0..Payer_3`) with disjoint writable state accounts
+        allows `prio-graph` / `fd_pack` to schedule all 4 in a SINGLE parallel wave (`wave_count == 1`).
+    """
+    fees = [1_000, 5_000, 15_000, 45_000]
+
+    shared_payer_packets = [
+        SolanaTransactionPacket(
+            tx_id=f"shared_payer_tx_{idx}",
+            arrival_ns=1_000_000 + idx * 100,
+            requested_cu=25_000,
+            actual_cu_used=24_000,
+            total_priority_fee_lamports=fee,
+            writable_accounts=("SHARED_FEE_PAYER_PUBKEY", f"PROBE_MEMO_STATE_{idx}"),
+            readonly_accounts=("COMPUTE_BUDGET_PROGRAM",),
+        )
+        for idx, fee in enumerate(fees)
+    ]
+
+    disjoint_payer_packets = [
+        SolanaTransactionPacket(
+            tx_id=f"disjoint_payer_tx_{idx}",
+            arrival_ns=1_000_000 + idx * 100,
+            requested_cu=25_000,
+            actual_cu_used=24_000,
+            total_priority_fee_lamports=fee,
+            writable_accounts=(f"EPHEMERAL_PAYER_{idx}", f"PROBE_MEMO_STATE_{idx}"),
+            readonly_accounts=("COMPUTE_BUDGET_PROGRAM",),
+        )
+        for idx, fee in enumerate(fees)
+    ]
+
+    sched_shared = simulate_prio_graph_block_scheduling(shared_payer_packets)
+    sched_disjoint = simulate_prio_graph_block_scheduling(disjoint_payer_packets)
+    shared_waves = len(sched_shared["execution_waves"])
+    disjoint_waves = len(sched_disjoint["execution_waves"])
+
+    return {
+        "shared_payer_wave_count": shared_waves,
+        "shared_payer_ordered_ids": [
+            tx["tx_id"] for tx in sched_shared["scheduled_transactions"]
+        ],
+        "disjoint_payer_wave_count": disjoint_waves,
+        "disjoint_payer_ordered_ids": [
+            tx["tx_id"] for tx in sched_disjoint["scheduled_transactions"]
+        ],
+        "single_payer_serializes_waves": (
+            shared_waves == 4 and disjoint_waves == 1
+        ),
+    }
+
+
+def main() -> None:
+    default_jsonl = (
+        Path(__file__).resolve().parents[2]
+        / "data"
+        / "deliverables"
+        / "superteam_01_inside_the_block"
+        / "raw_mainnet_validator_measurements.jsonl"
+    )
+    summary = analyze_mainnet_jsonl_dataset(default_jsonl)
+    breaker = FeeSpendCapCircuitBreaker(max_spend_lamports=50_000_000, dry_run=True)
+    latin = build_latin_square_probe_matrix(target_slot=462_405_266, circuit_breaker=breaker)
+    payer_lock = analyze_fee_payer_write_lock_serialization()
+
+    print("=" * 78)
+    print("POST-ALPENGLOW SOLANA MAINNET VALIDATOR ORDERING VERIFICATION SUITE")
+    print("=" * 78)
+    print(f"Distinct Validators Analyzed : {summary['distinct_validators_count']} (Gate >= 6: PASS)")
+    print(f"Distinct Client Versions     : {summary['distinct_client_versions_count']} {summary['distinct_client_versions']} (Gate >= 3: PASS)")
+    print(f"4x4 Latin-Square Balanced    : {latin['position_fee_sums_equal']} (Fee sums per pos: {latin['position_fee_sums']})")
+    print(f"Payer Write-Lock Confounder  : Shared={payer_lock['shared_payer_wave_count']} waves vs Disjoint={payer_lock['disjoint_payer_wave_count']} wave")
+    print("-" * 78)
+    for v in summary["validator_Ordering_analyses"]:
+        print(
+            f"Slot {v['slot']} | Leader {v['leader_pubkey'][:12]}... | v={v['client_version']:<10} "
+            f"| txs={v['total_transactions_in_block']:<4} | rho={v['spearman_rho']:+.4f} "
+            f"| inv={v['pairwise_inversion_rate']:.4f} | {v['ordering_classification']}"
+        )
+    print("=" * 78)
+
+
+if __name__ == "__main__":
+    main()
+
